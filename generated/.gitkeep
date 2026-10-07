@@ -1,0 +1,350 @@
+# Bulk Certificate Generator API
+
+A small backend service that accepts **one request containing many recipients**, generates a PDF certificate for each of them in the background, and lets the client track progress and download the results.
+
+## 1. Project overview
+
+A client sends a course name, an issue date and a list of recipients. The API validates everything, stores a *generation job*, and immediately answers `202 Accepted` with a job id. A background task then generates one PDF per recipient using a single predefined template. The client polls the job to see progress (successful / failed per certificate) and downloads each PDF by its own URL.
+
+## 2. Features
+
+- Bulk generation: one `POST` for up to 1000 recipients.
+- Strict validation with Pydantic (`EmailStr`, length limits, valid dates, non-empty lists).
+- One predefined, professional-looking certificate (ReportLab): border, title, recipient, course, date, certificate id.
+- Background processing with FastAPI `BackgroundTasks`; the API never waits for the PDFs.
+- Per-certificate failure isolation: one failure never stops the others.
+- Job status with live progress: `PENDING`, `PROCESSING`, `COMPLETED`, `COMPLETED_WITH_ERRORS`, `FAILED`.
+- Safe file serving (path traversal protection) and sensible HTTP status codes.
+- Isolated test suite (temporary database and output folder, no `sleep`).
+
+## 3. Tech stack
+
+| Purpose | Library |
+|---|---|
+| API framework | FastAPI + Uvicorn |
+| Database | SQLite via SQLAlchemy 2.x |
+| Validation | Pydantic v2 (+ email-validator) |
+| PDF generation | ReportLab |
+| Tests | pytest + FastAPI TestClient (httpx) |
+
+## 4. Project structure
+
+```text
+bulk-certificate-generator/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                    # FastAPI app, startup, health endpoint
+│   ├── config.py                  # settings from environment / .env
+│   ├── database.py                # engine, session factory, DB dependencies
+│   ├── models.py                  # GenerationJob and Certificate tables
+│   ├── schemas.py                 # Pydantic request/response models
+│   ├── routers/
+│   │   ├── __init__.py
+│   │   ├── jobs.py                # POST /api/jobs/, GET /api/jobs/{id}
+│   │   └── certificates.py        # GET /api/certificates/{id}
+│   └── services/
+│       ├── __init__.py
+│       ├── certificate_service.py # renders ONE PDF (no DB, no HTTP)
+│       └── job_processor.py       # background loop over a job's recipients
+├── generated/
+│   └── .gitkeep                   # PDFs are written here (ignored by Git)
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py
+│   ├── test_jobs.py
+│   ├── test_validation.py
+│   ├── test_certificate_generation.py
+│   ├── test_job_status.py
+│   ├── test_failure_handling.py
+│   └── test_certificate_download.py
+├── .env.example
+├── .gitignore
+├── pytest.ini
+├── requirements.txt
+└── README.md
+```
+
+## 5. Setup instructions
+
+Requirements: **Python 3.9 or newer** (3.11+ recommended) and `pip`.
+
+```bash
+git clone <your-repository-url>
+cd bulk-certificate-generator
+```
+
+## 6. Virtual environment
+
+```bash
+python -m venv .venv
+```
+
+Activate it:
+
+- Windows (PowerShell / cmd): `.venv\Scripts\activate`
+- Linux / macOS: `source .venv/bin/activate`
+
+## 7. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+## 8. Environment configuration
+
+Configuration is optional; the defaults work out of the box. To override them:
+
+```bash
+cp .env.example .env        # Windows: copy .env.example .env
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./certificates.db` | SQLAlchemy database URL |
+| `GENERATED_FILES_DIR` | `./generated` | Where PDFs are stored |
+
+Real environment variables take priority over values in `.env`. The `.env` file is ignored by Git.
+
+## 9. Database setup / behaviour
+
+There is nothing to set up manually. On startup the app creates the `generated/` folder and the SQLite file (`certificates.db`) with its two tables if they do not exist. Delete `certificates.db` to start fresh.
+
+## 10. Run the application
+
+```bash
+uvicorn app.main:app --reload
+```
+
+The API is now at `http://127.0.0.1:8000`.
+
+## 11. Run the tests
+
+```bash
+pytest
+```
+
+Tests use a temporary SQLite file and a temporary output folder per test, so your real `certificates.db` and `generated/` folder are never touched.
+
+## 12. API documentation
+
+Interactive Swagger UI: **http://127.0.0.1:8000/docs** (ReDoc: `http://127.0.0.1:8000/redoc`).
+
+| Method | Path | Purpose | Success | Errors |
+|---|---|---|---|---|
+| POST | `/api/jobs/` | Create a bulk generation job | `202` | `422` invalid input |
+| GET | `/api/jobs/{job_id}` | Job progress and per-certificate results | `200` | `404` unknown job |
+| GET | `/api/certificates/{certificate_id}` | Download one PDF | `200` | `404` unknown certificate or missing file, `409` not generated yet, `410` generation failed |
+| GET | `/api/health` | Liveness check | `200` | - |
+
+### Validation rules
+
+- `recipients`: 1 to 1000 items.
+- `name`: 1 to 100 characters after trimming, no control characters (such as newlines).
+- `email`: must be a valid email address.
+- `course_name`: 1 to 120 characters after trimming, no control characters.
+- `issue_date`: a real calendar date, `YYYY-MM-DD`.
+
+If any recipient is invalid, the **whole request is rejected with `422`** and nothing is stored. The `FAILED` certificate state is reserved for errors that happen *during generation*.
+
+## 13. Example POST request
+
+```http
+POST /api/jobs/
+Content-Type: application/json
+
+{
+  "course_name": "Python Backend Development",
+  "issue_date": "2026-10-07",
+  "recipients": [
+    { "name": "John Doe", "email": "john@example.com" },
+    { "name": "Jane Smith", "email": "jane@example.com" }
+  ]
+}
+```
+
+## 14. Example response
+
+`202 Accepted`:
+
+```json
+{
+  "job_id": "8f0c1c0e-5d0b-4a52-9a43-0c3f6d1d2b11",
+  "status": "PENDING",
+  "total": 2,
+  "successful": 0,
+  "failed": 0
+}
+```
+
+## 15. Check job status
+
+```http
+GET /api/jobs/8f0c1c0e-5d0b-4a52-9a43-0c3f6d1d2b11
+```
+
+```json
+{
+  "job_id": "8f0c1c0e-5d0b-4a52-9a43-0c3f6d1d2b11",
+  "course_name": "Python Backend Development",
+  "issue_date": "2026-10-07",
+  "status": "COMPLETED_WITH_ERRORS",
+  "total": 3,
+  "successful": 2,
+  "failed": 1,
+  "created_at": "2026-10-07T09:30:00.123456",
+  "completed_at": "2026-10-07T09:30:00.456789",
+  "certificates": [
+    {
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "recipient_name": "John Doe",
+      "email": "john@example.com",
+      "status": "COMPLETED",
+      "download_url": "/api/certificates/a1111111-1111-4111-8111-111111111111",
+      "error": null
+    },
+    {
+      "id": "b2222222-2222-4222-8222-222222222222",
+      "recipient_name": "Ravi कुमार",
+      "email": "ravi@example.com",
+      "status": "FAILED",
+      "download_url": null,
+      "error": "Recipient name contains characters that the certificate font cannot render"
+    },
+    {
+      "id": "c3333333-3333-4333-8333-333333333333",
+      "recipient_name": "Jane Smith",
+      "email": "jane@example.com",
+      "status": "COMPLETED",
+      "download_url": "/api/certificates/c3333333-3333-4333-8333-333333333333",
+      "error": null
+    }
+  ]
+}
+```
+
+Job status meaning:
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | Stored, background task has not started yet |
+| `PROCESSING` | Certificates are being generated (counters update after each one) |
+| `COMPLETED` | Every certificate succeeded |
+| `COMPLETED_WITH_ERRORS` | At least one succeeded and at least one failed |
+| `FAILED` | Every certificate failed, or an unexpected job-level error aborted the job |
+
+## 16. Download a certificate
+
+```http
+GET /api/certificates/a1111111-1111-4111-8111-111111111111
+```
+
+Returns the PDF (`Content-Type: application/pdf`). Use the `download_url` from the job status response.
+
+## 17. Example curl commands
+
+Health check:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+Create a job (Linux / macOS / Git Bash):
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "course_name": "Python Backend Development",
+    "issue_date": "2026-10-07",
+    "recipients": [
+      {"name": "John Doe", "email": "john@example.com"},
+      {"name": "Jane Smith", "email": "jane@example.com"}
+    ]
+  }'
+```
+
+Windows PowerShell has different quoting rules, so put the JSON in a file named `request.json` and use `curl.exe`:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/jobs/ -H "Content-Type: application/json" --data "@request.json"
+```
+
+Check status and download:
+
+```bash
+curl http://127.0.0.1:8000/api/jobs/<JOB_ID>
+curl -o certificate.pdf http://127.0.0.1:8000/api/certificates/<CERTIFICATE_ID>
+```
+
+## 18. Example workflow
+
+1. `POST /api/jobs/` with the recipients. Copy `job_id` from the `202` response.
+2. `GET /api/jobs/<job_id>` until `status` is `COMPLETED`, `COMPLETED_WITH_ERRORS` or `FAILED`.
+3. For each certificate with `status: COMPLETED`, `GET` its `download_url` to receive the PDF.
+4. For certificates with `status: FAILED`, read `error` to see why.
+
+## 19. Certificate generation
+
+`app/services/certificate_service.py` draws a single landscape A4 page with ReportLab: double border, "CERTIFICATE OF COMPLETION", the recipient's name, the course name, the issue date and the certificate id in the footer. Very long names or courses are shrunk to fit the page.
+
+Design details:
+
+- The file is named `<certificate-uuid>.pdf`. User input never becomes part of a path.
+- The PDF is first written to `<id>.pdf.part` and renamed when finished, so a crash never leaves a half-written file that looks valid.
+- Built-in PDF fonts only cover Western European characters. Names with other scripts (for example Devanagari) are rejected for that one certificate with a clear error instead of producing a garbled PDF.
+- The service knows nothing about HTTP or the database, so it is easy to test and to explain.
+
+## 20. Background processing
+
+`POST /api/jobs/` stores the job and all certificate rows in one transaction, schedules `process_job` with FastAPI `BackgroundTasks`, and returns `202`. After the response is sent, `process_job`:
+
+1. opens its **own** database session (the request session is already closed),
+2. sets the job to `PROCESSING`,
+3. generates the certificates one by one and **commits after each one**, so polling clients see live progress,
+4. sets the final job status and `completed_at`.
+
+## 21. Failure handling
+
+- **Per certificate:** each PDF is generated inside its own `try/except`. A failure marks only that certificate `FAILED` with a short, safe message; the loop continues. With 100 recipients and a failure at #37, certificates 1-36 stay `COMPLETED`, 38-100 are still attempted, and the job ends as `COMPLETED_WITH_ERRORS`.
+- **No leaking internals:** unexpected exceptions are logged with a stack trace on the server, but the API only shows a generic message with the exception type.
+- **Job level:** if something outside a single certificate fails (for example a database error), the job is marked `FAILED`, finished certificates keep their result, and unprocessed ones are marked `FAILED` so nothing stays `PENDING` forever.
+- **Duplicate runs:** `process_job` only starts a job that is still `PENDING`.
+- **Input errors:** rejected up front with `422`; nothing is stored.
+
+## 22. Database / design decisions
+
+- **Two tables:** `generation_jobs` (one row per request) and `certificates` (one row per recipient), linked by a foreign key and a SQLAlchemy relationship.
+- **UUID string ids:** unguessable, so download URLs cannot be enumerated.
+- **`position` column:** keeps certificates in the order the client sent them.
+- **Counters on the job** (`total`, `successful`, `failed`) make status polling a cheap read.
+- **Commit per certificate:** progress is visible and finished work survives a later crash.
+- **Dependency injection** for the database session, the session factory and the output folder, so tests swap them for temporary ones.
+- **Status codes:** `202` accepted, `404` unknown id, `409` not ready yet, `410` permanently failed, `422` invalid input.
+- **File serving safety:** the stored path is resolved and must be inside the generated folder before it is served.
+
+## 23. Why SQLite
+
+It is a real relational database, needs no server, and makes the project runnable with zero setup, which fits the scope of this assignment. Because all database access goes through SQLAlchemy, switching to PostgreSQL later only requires changing `DATABASE_URL` (plus adding a driver such as `psycopg`).
+
+## 24. Why FastAPI BackgroundTasks
+
+The requirement is to not make the client wait for the PDFs, without extra infrastructure. `BackgroundTasks` is built into FastAPI, runs after the response is sent, and is simple to explain and test. Trade-off: tasks live inside the server process, so a restart in the middle of a job interrupts it (see future improvements). A queue such as Celery or RQ would fix that but adds Redis/workers, which the assignment asked to avoid.
+
+## 25. Future improvements
+
+- Run a recovery step on startup that re-queues or fails jobs stuck in `PROCESSING` after a crash.
+- Move to a real task queue (Celery/RQ/Arq) with retries for multi-server deployments.
+- Use a Unicode TTF font so names in all scripts can be rendered.
+- Offer a ZIP download of all certificates in a job.
+- Pagination for jobs with very large recipient lists.
+- Database migrations with Alembic and PostgreSQL for production.
+- Authentication, rate limiting and automatic cleanup of old files.
+- Optional email delivery of certificates.
+
+## 26. What I learned
+
+- Background tasks run after the request ends, so they need their own database session; reusing the request session is a classic bug.
+- Isolating failures with a `try/except` per item, and committing per item, is what makes a bulk job robust and observable.
+- FastAPI dependency overrides make background work testable without sleeps or global state.
+- Filenames must be generated by the server, never taken from user input, and served paths still need to be verified.
+- Choosing the correct HTTP status (`202`, `409`, `410`) makes an API self-explanatory to clients.

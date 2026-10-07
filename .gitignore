@@ -1,0 +1,36 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local configuration (never commit real settings)
+.env
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated certificates (keep the folder itself via .gitkeep)
+generated/*
+!generated/.gitkeep
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
